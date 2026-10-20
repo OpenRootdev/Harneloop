@@ -15,6 +15,7 @@
       "enum": ["structural", "targeted", "representative", "full"]
     },
     "candidate_base_version": { "type": ["string", "null"] },
+    "candidate_sha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
     "run_id": { "type": ["string", "null"] },
     "artifact_id": { "type": ["string", "null"] },
     "path": { "type": ["string", "null"] },

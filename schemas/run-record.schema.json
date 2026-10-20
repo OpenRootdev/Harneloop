@@ -14,6 +14,11 @@
     "harness_version": { "type": ["string", "null"] },
     "candidate_id": { "type": ["string", "null"] },
     "candidate_base_version": { "type": ["string", "null"] },
+    "candidate_sha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+    "benchmark_id": { "type": ["string", "null"] },
+    "benchmark_task_id": { "type": ["string", "null"] },
+    "benchmark_trial": { "type": ["integer", "null"], "minimum": 0 },
+    "benchmark_arm": { "type": ["string", "null"], "enum": ["baseline", "candidate", null] },
     "candidate_validation_tier": {
       "type": ["string", "null"],
       "enum": ["structural", "targeted", "representative", "full", null]
