@@ -56,3 +56,18 @@ class EvidenceIntegrityTests(unittest.TestCase):
         set_candidate_status(self.unit, self.candidate.name, 'ready')
         promote_candidate(self.unit, self.candidate.name, 'v1')
         self.assertEqual((self.unit / 'agent-facing/policy.md').read_text(), 'Tested policy')
+
+    def test_other_candidates_run_cannot_validate_this_candidate(self):
+        other = create_candidate(self.unit, 'Different policy')
+        with self.assertRaisesRegex(HarneloopError, 'different candidate'):
+            add_evidence(self.unit, other.name, 'test', 'Wrong candidate result',
+                         run_id=self.run.name, artifact_id=self.artifact['id'])
+
+    def test_baseline_run_can_supply_comparison_context(self):
+        baseline = start_run(self.unit, 'Baseline observation')
+        result = Path(self.temp.name) / 'baseline.txt'
+        result.write_text('Baseline context')
+        artifact = add_artifact(self.unit, baseline.name, result, 'test-result')
+        finish_run(self.unit, baseline.name, 'succeeded', 'Baseline observation')
+        add_evidence(self.unit, self.candidate.name, 'comparison', 'Baseline context',
+                     run_id=baseline.name, artifact_id=artifact['id'])

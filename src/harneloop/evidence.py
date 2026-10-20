@@ -55,6 +55,8 @@ def validate_evidence_references(unit_root: Path, record: dict[str, Any]) -> Non
         if not run_file.is_file():
             raise HarneloopError(f"Run does not exist: {run_id}")
         run_record = read_run(unit_root, str(run_id))
+        if candidate_id and run_record.get("candidate_id") not in {None, candidate_id}:
+            raise HarneloopError("Evidence run belongs to a different candidate")
         if candidate_id and run_record.get("candidate_id") == candidate_id and run_record.get("candidate_sha256"):
             if candidate_digest(unit_root, str(candidate_id)) != run_record["candidate_sha256"]:
                 raise HarneloopError("Candidate overlay changed since the referenced run; rerun validation")
