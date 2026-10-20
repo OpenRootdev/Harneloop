@@ -3,12 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .candidate import VALIDATION_TIER_RANK, read_candidate, validate_tier
+from .candidate import VALIDATION_TIER_RANK, candidate_digest, read_candidate, validate_tier
 from .errors import HarneloopError
 from .locking import file_lock, harness_lock_path
 from .runs import read_run
 from .state import now_iso
-from .versioning import candidate_root, ensure_unit
+from .versioning import candidate_root, ensure_unit, hash_file
 from .yamlio import read_yaml, write_yaml
 
 
@@ -39,6 +39,12 @@ def validate_evidence_references(unit_root: Path, record: dict[str, Any]) -> Non
     run_id = record.get("run_id")
     artifact_id = record.get("artifact_id")
     evidence_path = record.get("path")
+    candidate_id = record.get("candidate_id")
+    # New evidence records bind all observations to the overlay being assessed.
+    # Legacy records without a fingerprint remain readable.
+    if candidate_id and record.get("candidate_sha256"):
+        if candidate_digest(unit_root, str(candidate_id)) != record["candidate_sha256"]:
+            raise HarneloopError("Candidate overlay changed after evidence was attached; collect fresh evidence")
 
     if artifact_id and not run_id:
         raise HarneloopError(f"Evidence artifact `{artifact_id}` requires a run_id")
@@ -49,6 +55,9 @@ def validate_evidence_references(unit_root: Path, record: dict[str, Any]) -> Non
         if not run_file.is_file():
             raise HarneloopError(f"Run does not exist: {run_id}")
         run_record = read_run(unit_root, str(run_id))
+        if candidate_id and run_record.get("candidate_id") == candidate_id and run_record.get("candidate_sha256"):
+            if candidate_digest(unit_root, str(candidate_id)) != run_record["candidate_sha256"]:
+                raise HarneloopError("Candidate overlay changed since the referenced run; rerun validation")
 
     if artifact_id:
         artifacts = (run_record.get("artifacts") or []) if run_record else []
@@ -59,6 +68,10 @@ def validate_evidence_references(unit_root: Path, record: dict[str, Any]) -> Non
         stored_file = (unit_root / str(stored_path)).resolve() if stored_path else None
         if stored_file is None or not stored_file.is_file():
             raise HarneloopError(f"Artifact stored file does not exist for `{artifact_id}` in run `{run_id}`")
+        if not stored_file.is_relative_to(unit_root.resolve()):
+            raise HarneloopError("Stored artifact escapes its harness unit")
+        if artifact.get("sha256") and hash_file(stored_file) != artifact["sha256"]:
+            raise HarneloopError("Stored artifact changed after capture; collect fresh evidence")
 
     if evidence_path:
         referenced_file = Path(str(evidence_path))
@@ -99,6 +112,7 @@ def add_evidence(
             "outcome": outcome,
             "validation_tier": selected_tier,
             "candidate_base_version": candidate.get("base_version"),
+            "candidate_sha256": candidate_digest(unit_root, candidate_id),
             "run_id": run_id,
             "artifact_id": artifact_id,
             "path": str(resolved_path) if resolved_path else None,

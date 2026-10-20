@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .candidate import OPEN_CANDIDATE_STATUSES, read_candidate
+from .candidate import OPEN_CANDIDATE_STATUSES, candidate_digest, read_candidate
 from .errors import HarneloopError
 from .intake import ensure_intake_ready
 from .locking import file_lock, harness_lock_path
@@ -62,16 +62,61 @@ def start_run(
     task: str,
     candidate_id: str | None = None,
     attempt_id: str | None = None,
+    *,
+    benchmark_id: str | None = None,
+    benchmark_task_id: str | None = None,
+    benchmark_trial: int | None = None,
+    benchmark_arm: str | None = None,
 ) -> Path:
     unit_root = unit_root.resolve()
     ensure_unit(unit_root)
     ensure_intake_ready(unit_root)
     candidate: dict[str, Any] | None = None
+    candidate_sha256: str | None = None
     if candidate_id:
+        candidate_sha256 = candidate_digest(unit_root, candidate_id)
         candidate = read_candidate(unit_root, candidate_id)
         status = str(candidate.get("status", "draft"))
         if status not in OPEN_CANDIDATE_STATUSES or status == "needs_rebase":
             raise HarneloopError(f"Candidate `{candidate_id}` cannot be tested while its status is `{status}`")
+    benchmark_fields = (benchmark_id, benchmark_task_id, benchmark_trial, benchmark_arm)
+    if any(value is not None for value in benchmark_fields):
+        if (
+            not all(value is not None for value in benchmark_fields)
+            or not isinstance(benchmark_id, str)
+            or not benchmark_id.strip()
+            or not isinstance(benchmark_task_id, str)
+            or not benchmark_task_id.strip()
+            or isinstance(benchmark_trial, bool)
+            or not isinstance(benchmark_trial, int)
+            or benchmark_trial < 0
+            or benchmark_arm not in {"baseline", "candidate"}
+            or (benchmark_arm == "baseline" and candidate_id is not None)
+            or (benchmark_arm == "candidate" and candidate_id is None)
+        ):
+            raise HarneloopError("Benchmark run identity is incomplete or inconsistent")
+        from .benchmarks import read_benchmark
+
+        benchmark = read_benchmark(unit_root, benchmark_id)
+        task_record = next(
+            (item for item in benchmark["tasks"] if item["task_id"] == benchmark_task_id),
+            None,
+        )
+        binding = benchmark.get("candidate_binding")
+        if (
+            task_record is None
+            or task_record.get("split") != "test"
+            or benchmark_trial >= benchmark["repeats"]
+            or not isinstance(binding, dict)
+        ):
+            raise HarneloopError("Benchmark run must match a bound heldout task and trial")
+        if candidate_digest(unit_root, binding["candidate_id"]) != binding["candidate_sha256"]:
+            raise HarneloopError("Candidate overlay changed after benchmark binding")
+        if benchmark_arm == "candidate":
+            if candidate_id != binding.get("candidate_id"):
+                raise HarneloopError("Candidate run does not match the preregistered benchmark candidate")
+        elif candidate_id is not None:
+            raise HarneloopError("Baseline benchmark runs cannot use a candidate overlay")
     with file_lock(harness_lock_path(unit_root, "runs")):
         unit_meta = read_yaml(unit_root / "unit.yaml")
         run_id = next_run_id(unit_root)
@@ -91,7 +136,12 @@ def start_run(
                 "harness_version": unit_meta.get("current_version"),
                 "candidate_id": candidate_id,
                 "candidate_base_version": candidate.get("base_version") if candidate else None,
+                "candidate_sha256": candidate_sha256,
                 "candidate_validation_tier": candidate.get("validation_tier") if candidate else None,
+                "benchmark_id": benchmark_id,
+                "benchmark_task_id": benchmark_task_id,
+                "benchmark_trial": benchmark_trial,
+                "benchmark_arm": benchmark_arm,
                 "attempt_id": attempt_id,
                 "evaluation_status": "pending",
                 "evaluation_outcome": None,

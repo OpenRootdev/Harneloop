@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import stat
 from pathlib import Path
 
 from .errors import HarneloopError
@@ -45,6 +48,43 @@ def candidate_path(unit_root: Path, candidate_id: str) -> Path:
 
 def read_candidate(unit_root: Path, candidate_id: str) -> dict[str, object]:
     return read_yaml(candidate_path(unit_root, candidate_id) / "candidate.yaml")
+
+
+def candidate_digest(unit_root: Path, candidate_id: str) -> str:
+    """Fingerprint the candidate overlay files that define its executable changes."""
+    unit_root = unit_root.resolve()
+    root = candidate_path(unit_root, candidate_id)
+    if (unit_root / "candidates").is_symlink() or root.is_symlink() or not root.resolve().is_relative_to(unit_root):
+        raise HarneloopError(f"Candidate path escapes the harness unit: {candidate_id}")
+    if (root / "candidate.yaml").is_symlink():
+        raise HarneloopError(f"Candidate metadata cannot be a symlink: {candidate_id}")
+    changes = root / "changes"
+    if changes.is_symlink():
+        raise HarneloopError(f"Candidate changes path cannot be a symlink: {candidate_id}")
+    entries: list[dict[str, object]] = []
+    if changes.exists():
+        for path in sorted(changes.rglob("*")):
+            if path.is_symlink():
+                raise HarneloopError(f"Candidate overlay contains a symlink: {path}")
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+            if not resolved.is_relative_to(changes.resolve()):
+                raise HarneloopError(f"Candidate overlay escapes its changes directory: {path}")
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            entries.append(
+                {
+                    "path": path.relative_to(changes).as_posix(),
+                    "sha256": digest.hexdigest(),
+                    "size": path.stat().st_size,
+                    "mode": stat.S_IMODE(path.stat().st_mode),
+                }
+            )
+    payload = json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def list_candidates(unit_root: Path, include_closed: bool = True) -> list[dict[str, object]]:

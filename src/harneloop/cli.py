@@ -17,6 +17,8 @@ from .candidate import (
 from .diagnostics import run_doctor
 from .environment import ENVIRONMENT_MODES, INTERACTION_MODES, connect_environment, render_environment_status
 from .errors import HarneloopError
+from .benchmarks import create_benchmark, read_benchmark, record_benchmark_result, compare_benchmark
+from .refinement import compose_candidates, add_lesson, list_lessons
 from .evidence import add_evidence
 from .intake import (
     ACKNOWLEDGEMENT_BASES,
@@ -63,6 +65,45 @@ def add_unit_reference(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="harneloop", description="Harneloop harness-unit lifecycle engine")
     subparsers = parser.add_subparsers(dest="command")
+
+    benchmark = subparsers.add_parser(
+        "benchmark", help="Freeze external benchmark conditions and compare artifact-backed results",
+        description="External agents and graders produce results; Harneloop checks provenance and paired coverage. Scores are 0 to 1, higher is better.",
+        epilog="Workflow and JSON format: https://github.com/OpenRootdev/Harneloop/tree/main/examples/benchmark-evidence",
+    )
+    benchmark_commands = benchmark.add_subparsers(dest="benchmark_command", required=True)
+    for name, help_text in [
+        ("create", "Freeze a new JSON manifest; refuses to overwrite"),
+        ("show", "Show a verified frozen manifest"),
+        ("bind", "Freeze the candidate identity and content before held-out results"),
+        ("record", "Attach one JSON result to a finished run and stored artifacts"),
+        ("compare", "Verify complete matched held-out trials and report paired outcomes"),
+    ]:
+        command = benchmark_commands.add_parser(name, help=help_text)
+        add_unit_reference(command)
+        command.add_argument("benchmark_id", help="Unit-local benchmark identifier")
+        if name == "create":
+            command.add_argument("--manifest", type=Path, required=True, help="JSON manifest with source/tasks/conditions/grader")
+        elif name == "record":
+            command.add_argument("--result", type=Path, required=True, help="JSON row including observed_conditions, arm, task_id, trial, run_id, score and artifact_ids")
+        elif name in {"bind", "compare"}:
+            command.add_argument("--candidate-id", required=True)
+
+    refine = subparsers.add_parser("refine", help="Compose candidate overlays and retrieve evidence-linked lessons")
+    refine_commands = refine.add_subparsers(dest="refine_command", required=True)
+    compose = refine_commands.add_parser("compose", help="Combine compatible candidates; fresh validation is required")
+    add_unit_reference(compose)
+    compose.add_argument("--candidate-id", action="append", required=True)
+    compose.add_argument("--summary", required=True)
+    learn = refine_commands.add_parser("learn", help="Store an observation linked to a finished run artifact")
+    add_unit_reference(learn)
+    learn.add_argument("--cue", required=True)
+    learn.add_argument("--lesson", required=True)
+    learn.add_argument("--run-id", required=True)
+    learn.add_argument("--artifact-id", required=True)
+    lessons = refine_commands.add_parser("lessons", help="Retrieve lessons and recheck their source artifacts")
+    add_unit_reference(lessons)
+    lessons.add_argument("--query", default="")
 
     onboard_parser = subparsers.add_parser("onboard", help="Print the new-harness onboarding checklist")
     onboard_parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
@@ -254,6 +295,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_start.add_argument("--task", required=True)
     run_start.add_argument("--candidate-id")
     run_start.add_argument("--attempt-id")
+    run_start.add_argument("--benchmark-id")
+    run_start.add_argument("--benchmark-task-id")
+    run_start.add_argument("--benchmark-trial", type=int)
+    run_start.add_argument("--benchmark-arm", choices=["baseline", "candidate"])
 
     run_finish = run_subparsers.add_parser("finish", help="Finish a run record")
     add_unit_reference(run_finish)
@@ -303,6 +348,16 @@ def coerce_cli_value(value: str) -> object:
     return value
 
 
+def read_json_object(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        raise HarneloopError(f"Cannot read JSON input: {error}") from error
+    if not isinstance(data, dict):
+        raise HarneloopError("JSON input must be an object")
+    return data
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -318,6 +373,37 @@ def main(argv: list[str] | None = None) -> int:
 
         if hasattr(args, "unit") and args.command != "units":
             args.unit = resolve_unit_reference(args.unit)
+
+        if args.command == "benchmark":
+            if args.benchmark_command == "create":
+                data = create_benchmark(args.unit, args.benchmark_id, read_json_object(args.manifest))
+            elif args.benchmark_command == "show":
+                data = read_benchmark(args.unit, args.benchmark_id)
+            elif args.benchmark_command == "bind":
+                from .benchmarks import bind_benchmark_candidate
+                data = bind_benchmark_candidate(args.unit, args.benchmark_id, args.candidate_id)
+            elif args.benchmark_command == "compare":
+                data = compare_benchmark(args.unit, args.benchmark_id, candidate_id=args.candidate_id)
+            else:
+                row = read_json_object(args.result)
+                required = {"observed_conditions", "arm", "task_id", "trial", "run_id", "score", "artifact_ids"}
+                allowed = required | {"status", "reason", "metrics"}
+                if set(row) - allowed or required - set(row):
+                    raise HarneloopError("Benchmark result has unknown fields or is missing required fields")
+                data = record_benchmark_result(args.unit, args.benchmark_id, **row)
+            print(json.dumps(data, indent=2))
+            return 0
+
+        if args.command == "refine":
+            if args.refine_command == "compose":
+                candidate = compose_candidates(args.unit, args.candidate_id, args.summary)
+                data = read_candidate(args.unit, candidate.name)
+            elif args.refine_command == "learn":
+                data = add_lesson(args.unit, args.cue, args.lesson, args.run_id, args.artifact_id)
+            else:
+                data = list_lessons(args.unit, args.query)
+            print(json.dumps(data, indent=2))
+            return 0
 
         if args.command == "onboard":
             if args.format == "json":
@@ -589,7 +675,11 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "run":
             if args.run_command == "start":
-                path = start_run(args.unit, args.task, args.candidate_id, args.attempt_id)
+                benchmark_fields = {}
+                if any(value is not None for value in [args.benchmark_id, args.benchmark_task_id, args.benchmark_trial, args.benchmark_arm]):
+                    benchmark_fields = {"benchmark_id": args.benchmark_id, "benchmark_task_id": args.benchmark_task_id,
+                                        "benchmark_trial": args.benchmark_trial, "benchmark_arm": args.benchmark_arm}
+                path = start_run(args.unit, args.task, args.candidate_id, args.attempt_id, **benchmark_fields)
                 print(f"Started run: {path.name}")
                 return 0
             if args.run_command == "finish":
