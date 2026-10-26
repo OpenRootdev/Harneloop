@@ -4,7 +4,7 @@ from pathlib import Path
 
 from .errors import HarneloopError
 from .locking import file_lock, harness_lock_path
-from .state import now_iso, update_state
+from .state import now_iso, read_state, write_state
 from .yamlio import read_yaml, write_yaml
 
 
@@ -62,17 +62,25 @@ def active_candidate_ids(unit_root: Path) -> list[str]:
     return [str(record["id"]) for record in list_candidates(unit_root, include_closed=False)]
 
 
-def _sync_candidate_state(unit_root: Path, focused_candidate: str | None, reason: str, next_action: str) -> None:
-    active = active_candidate_ids(unit_root)
-    focused = focused_candidate if focused_candidate in active else (active[-1] if active else None)
-    update_state(
-        unit_root,
-        state="active",
-        active_candidates=active,
-        active_candidate=focused,
-        reason=reason,
-        next_action=next_action,
-    )
+def _sync_candidate_state(
+    unit_root: Path, focused_candidate: str | None, reason: str, next_action: str, **updates: object
+) -> None:
+    unit_root = unit_root.resolve()
+    # List the open candidates under the state lock: a list taken before it can be older than
+    # the one a concurrent writer just stored, and writing it would drop that writer's candidate.
+    with file_lock(harness_lock_path(unit_root, "state")):
+        active = active_candidate_ids(unit_root)
+        focused = focused_candidate if focused_candidate in active else (active[-1] if active else None)
+        state = read_state(unit_root)
+        state.update(
+            updates,
+            state="active",
+            active_candidates=active,
+            active_candidate=focused,
+            reason=reason,
+            next_action=next_action,
+        )
+        write_state(unit_root, state)
 
 
 def next_candidate_id(unit_root: Path) -> str:

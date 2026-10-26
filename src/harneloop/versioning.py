@@ -8,14 +8,14 @@ import tempfile
 from pathlib import Path
 
 from .candidate import (
-    active_candidate_ids,
+    _sync_candidate_state,
     mark_parallel_candidates_needing_rebase,
     read_candidate,
 )
 from .errors import HarneloopError
 from .locking import file_lock, harness_lock_path
 from .paths import is_protected_candidate_path, packageable_files, relative_posix
-from .state import now_iso, update_state
+from .state import now_iso
 from .yamlio import read_yaml, write_yaml
 
 
@@ -214,15 +214,12 @@ def promote_candidate(
                 f"(`{candidate_meta.get('plane', candidate_meta.get('kind', 'legacy'))}` / "
                 f"`{candidate_meta.get('validation_tier', 'legacy')}`). {version_summary}\n"
             )
-        active = active_candidate_ids(unit_root)
-        update_state(
+        _sync_candidate_state(
             unit_root,
-            state="active",
-            current_version=version,
-            active_candidates=active,
-            active_candidate=active[-1] if active else None,
+            focused_candidate=None,
             reason="candidate_promoted",
             next_action="Create another candidate, package the harness unit, or stop if evidence is sufficient.",
+            current_version=version,
         )
     return version_root
 
@@ -251,14 +248,11 @@ def rollback_unit(unit_root: Path, version: str) -> Path:
         with changelog.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(f"- {now_iso()}: Rolled back working tree to `{version}`.\n")
         mark_parallel_candidates_needing_rebase(unit_root, "", version)
-        active = active_candidate_ids(unit_root)
-        update_state(
+        _sync_candidate_state(
             unit_root,
-            state="active",
-            current_version=version,
-            active_candidates=active,
-            active_candidate=active[-1] if active else None,
+            focused_candidate=None,
             reason="rollback",
             next_action="Inspect restored harness unit state before creating another candidate.",
+            current_version=version,
         )
     return version_root
