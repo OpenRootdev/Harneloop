@@ -5,8 +5,9 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
-from harneloop.candidate import create_candidate, list_candidates
+from harneloop.candidate import active_candidate_ids, create_candidate, list_candidates
 from harneloop.preferences import list_registered_units, register_unit
 from harneloop.runs import add_artifact, read_run, start_run
 from harneloop.intake import acknowledge_intake
@@ -34,6 +35,32 @@ class ConcurrencyTests(unittest.TestCase):
             self.assertEqual(len(candidate_ids), len(summaries))
             self.assertEqual(set(candidate_ids), set(returned_ids))
             self.assertEqual(set(read_state(unit)["active_candidates"]), set(candidate_ids))
+
+    def test_candidate_list_is_not_overwritten_by_an_older_one(self) -> None:
+        # The first creation pauses right after listing the open candidates. If that
+        # listing happens outside the state lock, the second creation finishes during
+        # the pause and the first one then writes its older list over it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            unit = init_unit(Path(temp_dir) / "unit", "demo", "Demo Unit")
+            listed = threading.Event()
+            second_created = threading.Event()
+
+            def list_then_pause(unit_root: Path) -> list[str]:
+                ids = active_candidate_ids(unit_root)
+                if not listed.is_set():
+                    listed.set()
+                    second_created.wait(timeout=1)
+                return ids
+
+            with mock.patch("harneloop.candidate.active_candidate_ids", side_effect=list_then_pause):
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    first = executor.submit(create_candidate, unit, "First change", plane="infrastructure")
+                    self.assertTrue(listed.wait(timeout=5))
+                    second = create_candidate(unit, "Second change", plane="infrastructure")
+                    second_created.set()
+                    first_id = first.result(timeout=10).name
+
+            self.assertEqual(sorted(read_state(unit)["active_candidates"]), sorted([first_id, second.name]))
 
     def test_parallel_unit_registrations_do_not_lose_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
